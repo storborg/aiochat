@@ -2,18 +2,20 @@ import sys
 import time
 import asyncio
 
-import asyncio_redis
 import websockets
 from websockets.exceptions import ConnectionClosed
+
+from . import model
 
 
 connected = {}
 
 
-async def broadcast(msg):
+async def broadcast(origin, msg):
     print('ALL > %s' % msg)
     for ws in connected:
-        await ws.send(msg)
+        if origin != ws:
+            await ws.send('%s: %s' % (connected[origin], msg))
 
 
 async def clock():
@@ -37,33 +39,22 @@ async def command(origin, msg):
         await origin.send('** Unknown command. **')
 
 
-async def pub_to_redis(r, msg):
-    await r.publish('aiochat', msg)
-
-
 async def handler(websock, path):
     global connected
+
+    loop = asyncio.get_event_loop()
 
     addr = websock.remote_address[0]
     connected[websock] = name = 'Anonymous %d' % id(websock)
     print('New connection from %s, known as %s' % (addr, name))
 
-    pub_conn = await asyncio_redis.Connection.create(host='localhost',
-                                                     port=6379)
-    sub_conn = await asyncio_redis.Connection.create(host='localhost',
-                                                     port=6379)
-
-    subscriber = await sub_conn.start_subscribe()
-    await subscriber.subscribe(['aiochat'])
-
     try:
         await websock.send('** You are known as %s **' % name)
         while True:
             listener_task = asyncio.ensure_future(websock.recv())
-            redis_task = asyncio.ensure_future(subscriber.next_published())
             clock_task = asyncio.ensure_future(clock())
             done, pending = await asyncio.wait(
-                [listener_task, redis_task, clock_task],
+                [listener_task, clock_task],
                 return_when=asyncio.FIRST_COMPLETED)
 
             if listener_task in done:
@@ -73,19 +64,15 @@ async def handler(websock, path):
                 if msg.startswith('/'):
                     await command(websock, msg)
                 else:
-                    s = '%s: %s' % (connected[websock], msg)
-                    await pub_to_redis(pub_conn, s)
+                    name = connected[websock]
+                    loop.run_in_executor(None,
+                                         model.record_message,
+                                         addr, name, msg)
+                    await broadcast(websock, msg)
                     print('%s > ** sent message **' % addr)
                     await websock.send('** sent message **')
             else:
                 listener_task.cancel()
-
-            if redis_task in done:
-                msg = redis_task.result()
-                msg = msg.value
-                await broadcast(msg)
-            else:
-                redis_task.cancel()
 
             if clock_task in done:
                 msg = clock_task.result()
@@ -93,7 +80,6 @@ async def handler(websock, path):
                 await websock.send('Server: ' + msg)
             else:
                 clock_task.cancel()
-
 
     except ConnectionClosed:
         print('Disconnected')
@@ -107,6 +93,8 @@ def main(args=sys.argv):
     else:
         port = int(args[1])
         start_server = websockets.serve(handler, 'localhost', port)
-        print("Listening on port %d" % port)
-        asyncio.get_event_loop().run_until_complete(start_server)
-        asyncio.get_event_loop().run_forever()
+        model.init('sqlite:///foo.db')
+        print("Listening on port %d..." % port)
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(start_server)
+        loop.run_forever()

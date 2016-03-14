@@ -1,11 +1,12 @@
+import time
 from datetime import datetime
 
-from sqlalchemy import Column, types, orm
+from sqlalchemy import Column, types, orm, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 
 
 Base = declarative_base()
-Session = orm.sessionmaker(autoflush=False)
+Session = orm.scoped_session(orm.sessionmaker())
 
 
 class Message(Base):
@@ -16,3 +17,19 @@ class Message(Base):
     name = Column(types.String(255), nullable=False)
     body = Column(types.String(255), nullable=False)
     timestamp = Column(types.DateTime, nullable=False, default=datetime.utcnow)
+
+
+def init(url):
+    print("Initializing DB...")
+    engine = create_engine(url)
+    Session.configure(bind=engine)
+    Base.metadata.bind = engine
+    Base.metadata.create_all()
+    print("DB ready.")
+
+
+def record_message(addr, name, body):
+    time.sleep(10)
+    msg = Message(origin=addr, name=name, body=body)
+    Session.add(msg)
+    Session.commit()
